@@ -1,5 +1,5 @@
 # Credentials (SECURE)
-credentials/service-accounts/*.json
+credentials/*
 !credentials/.gitkeep
 
 # Ignore environment files
