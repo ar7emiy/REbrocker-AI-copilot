@@ -2,19 +2,21 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from homeharvest import scrape_property
 import pandas as pd
+import os
+import socket  # To manually check DNS resolution
+import requests  # To check outgoing network requests
+from dotenv import load_dotenv
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-import os
-#from pathlib import Path
-from dotenv import load_dotenv
 
-os.environ['HTTPS_PROXY'] = ''
-os.environ['HTTP_PROXY'] = ''
+# Remove `os.environ.clear()` to avoid clearing necessary environment variables
 
-os.environ.clear()  # Clear any existing env vars
-print("Environment before load:", os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'))
-load_dotenv()
-print("Environment after load:", os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'))
+# Debug: Print essential environment variables
+load_dotenv()  # Load .env variables safely
+print("🔹 GOOGLE_APPLICATION_CREDENTIALS:", os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"))
+print("🔹 PATH:", os.environ.get("PATH"))
+print("🔹 HTTPS_PROXY:", os.environ.get("HTTPS_PROXY"))
+print("🔹 HTTP_PROXY:", os.environ.get("HTTP_PROXY"))
 
 app = FastAPI()
 
@@ -28,104 +30,73 @@ app.add_middleware(
 )
 
 # Define columns we want to keep
-# [THIS IS WHERE WE SELECTED SPECIFIC COLUMNS - EASY TO MODIFY]
 KEPT_COLUMNS = [
-    'full_street_line',
-    'city',
-    'state',
-    'zip_code',
-    'list_price',
-    'beds',
-    'full_baths',
-    'half_baths',
-    'sqft',
-    'status'
+    'mls', 'mls_id', 'full_street_line', 'street', 'unit', 'city', 'state', 'zip_code',
+    'beds', 'full_baths', 'half_baths', 'sqft', 'year_built', 'days_on_mls', 'list_price',
+    'list_price_min', 'list_price_max', 'list_date', 'sold_price', 'last_sold_date',
+    'assessed_value', 'estimated_value', 'tax', 'tax_history', 'new_construction',
+    'lot_sqft', 'price_per_sqft', 'latitude', 'longitude', 'neighborhoods', 'county',
+    'fips_code', 'stories', 'hoa_fee', 'parking_garage', 'agent_id', 'agent_name',
+    'agent_email', 'agent_phones', 'agent_mls_set', 'agent_nrds_id', 'broker_id',
+    'broker_name', 'builder_id', 'builder_name', 'office_id', 'office_mls_set', 'office_name',
+    'office_email', 'office_phones', 'nearby_schools'
 ]
 
-# Google Sheets setup
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-
-def get_google_sheets_service():
-    creds_path = os.path.abspath(os.getenv('GOOGLE_APPLICATION_CREDENTIALS'))
-    print(f"Attempting to load credentials from: {creds_path}")
-    print(f"File exists: {os.path.exists(creds_path)}")
-    
-    creds = service_account.Credentials.from_service_account_file(
-        creds_path,
-        scopes=SCOPES
-    )
-    return build('sheets', 'v4', credentials=creds)
-
-# Initialize sheet ID globally (we'll create it on first run)
-SHEET_ID = None
-
 @app.get("/")
-async def read_root():
+def read_root():
     return {"status": "running"}
 
-@app.post("/process-address")
-async def process_address(address: str):
+@app.get("/debug-dns")
+def debug_dns():
+    """Manually test DNS resolution & network connectivity."""
+    target_host = "parser-external.geo.moveaws.com"
+
     try:
-        # Add debug print
-        print(f"Processing address: {address}")
+        resolved_ip = socket.gethostbyname(target_host)
+        google_test = requests.get("https://www.google.com", timeout=5).status_code
+
+        return {
+            "status": "success",
+            "resolved_ip": resolved_ip,
+            "google_test_status": google_test
+        }
+    
+    except socket.gaierror as e:
+        return {"status": "error", "dns_error": str(e)}
+    
+    except requests.RequestException as e:
+        return {"status": "error", "network_error": str(e)}
+
+@app.post("/process-address")
+def process_address(address: str):
+    try:
+        print(f"📍 Processing address: {address}")
         
+        # Manually test DNS resolution before calling scrape_property
+        try:
+            test_host = "parser-external.geo.moveaws.com"
+            print(f"🔍 Resolving {test_host}...")
+            resolved_ip = socket.gethostbyname(test_host)
+            print(f"✅ Resolved {test_host} to {resolved_ip}")
+        except socket.gaierror as e:
+            raise HTTPException(status_code=500, detail=f"DNS resolution failed: {str(e)}")
+
+        # Fetch property data
         result = scrape_property(location=address)
-        
-        # Add debug print
-        print(f"Result received: {result is not None}")
-        
+
+        # Convert to DataFrame if not already
         if not isinstance(result, pd.DataFrame):
             result = pd.DataFrame([result])
-            
+
+        # Select only needed columns
         result = result[KEPT_COLUMNS]
+
+        # Combine bathroom counts
         result['total_baths'] = result['full_baths'] + (result['half_baths'] * 0.5)
         result = result.drop(['full_baths', 'half_baths'], axis=1)
-        
-        await update_sheet(result)
+
         return {"status": "success", "data": result.to_dict('records')[0]}
-    
+
     except Exception as e:
-        print(f"Error details: {str(e)}")  # Debug print
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Error processing address: {str(e)}"
-        )
-
-async def update_sheet(data: pd.DataFrame):
-    global SHEET_ID
-    
-    service = get_google_sheets_service()
-    
-    # If sheet doesn't exist, create it
-    if not SHEET_ID:
-        spreadsheet = {
-            'properties': {
-                'title': 'Property Listings'
-            }
-        }
-        spreadsheet = service.spreadsheets().create(body=spreadsheet).execute()
-        SHEET_ID = spreadsheet.get('spreadsheetId')
-        
-        # Add headers
-        headers = [data.columns.tolist()]
-        service.spreadsheets().values().update(
-            spreadsheetId=SHEET_ID,
-            range='A1',
-            valueInputOption='RAW',
-            body={'values': headers}
-        ).execute()
-    
-    # Append new data
-    values = data.values.tolist()
-    service.spreadsheets().values().append(
-        spreadsheetId=SHEET_ID,
-        range='A2',
-        valueInputOption='RAW',
-        body={'values': values}
-    ).execute()
-
-@app.get("/sheet")
-async def get_sheet():
-    if not SHEET_ID:
-        raise HTTPException(status_code=404, detail="Sheet not created yet")
-    return {"sheet_id": SHEET_ID}
+        print(f"❌ Error details: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
