@@ -30,13 +30,13 @@ def create_new_sheet(title, emails):
         permission = {"type": "user", "role": "writer", "emailAddress": email}
         drive_service.permissions().create(fileId=sheet_id, body=permission, fields="id").execute()
     
-    log_creation(sheet_url, sheet_id, all_emails)
+    log_creation(title, sheet_url, sheet_id, all_emails)
     return {"sheet_id": sheet_id, "sheet_url": sheet_url}
 
 
-def log_creation(sheet_url, sheet_id, emails):
+def log_creation(sheet_name, sheet_url, sheet_id, emails):
     sheets_service, _ = get_google_service()
-    log_data = [[sheet_url, sheet_id, ", ".join(emails)]]
+    log_data = [[sheet_name, sheet_url, sheet_id, ", ".join(emails)]]
     sheets_service.spreadsheets().values().append(
         spreadsheetId=LOG_SHEET_ID,
         range="A1",
